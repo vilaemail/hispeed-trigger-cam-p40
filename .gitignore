@@ -1,0 +1,51 @@
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Gradle files
+.gradle/
+build/
+
+# Kotlin compiler cache
+.kotlin/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Android Studio
+*.iml
+.idea/
+
+# Huawei SDK (download via scripts\fetch-sdk.bat)
+app/libs/
+
+# Temporary AAR extraction
+temp_aar/
+
+# Signing - never commit keystores or passwords
+signing/release.keystore
+signing/*.keystore
+signing/*.jks
+signing/keystore.properties
+
+# Release output
+release/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Log files
+*.log

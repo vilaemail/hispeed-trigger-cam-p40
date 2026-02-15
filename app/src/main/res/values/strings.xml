@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HST Camera</string>
+    <string name="capture">CAPTURE</string>
+    <string name="arm">ARM</string>
+    <string name="unarm">UNARM</string>
+    <string name="status_initializing">Initializing…</string>
+    <string name="fps_960">960fps\n1080p</string>
+    <string name="fps_1920">1920fps\n720p</string>
+</resources>
