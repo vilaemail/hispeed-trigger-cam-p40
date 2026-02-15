@@ -13,7 +13,9 @@ import android.util.Size
 import android.view.KeyEvent
 import android.view.Surface
 import android.view.TextureView
+import android.widget.PopupMenu
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.hispeedtriggercam.p40.databinding.ActivityMainBinding
 import com.huawei.camera.camerakit.ActionStateCallback
@@ -32,6 +34,9 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "HiSpeedTriggerCam"
         private const val CURRENT_MODE_TYPE = Mode.Type.SUPER_SLOW_MOTION
+        private const val PREFS_NAME = "hst_camera_prefs"
+        private const val PREF_SERVER_ENABLED = "http_server_enabled"
+        private const val PREF_USE_1920FPS = "use_1920fps"
     }
 
     private var use1920fps = true
@@ -57,6 +62,8 @@ class MainActivity : AppCompatActivity() {
     private var callbackThread: HandlerThread? = null
     private var callbackHandler: Handler? = null
 
+    private var captureServer: CaptureServer? = null
+
     // ── Lifecycle ───────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,12 +71,15 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        use1920fps = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getBoolean(PREF_USE_1920FPS, true)
+
         binding.captureButton.setOnClickListener { onCapturePressed() }
         binding.armButton.setOnClickListener { onArmPressed() }
-        binding.fpsToggleButton.setOnClickListener { onFpsTogglePressed() }
-        updateFpsButtonLabel()
+        binding.moreButton.setOnClickListener { showMoreMenu() }
         binding.textureView.surfaceTextureListener = surfaceTextureListener
         setupTapToFocus()
+        if (isServerEnabled()) startCaptureServer()
     }
 
     override fun onResume() {
@@ -88,6 +98,12 @@ class MainActivity : AppCompatActivity() {
         releaseCamera()
         stopBackgroundThreads()
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        captureServer?.stop()
+        captureServer = null
+        super.onDestroy()
     }
 
     override fun onRequestPermissionsResult(
@@ -397,7 +413,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     isRecordingReady = true
                     runOnUiThread {
-                        binding.fpsToggleButton.isEnabled = true
+                        binding.moreButton.isEnabled = true
                         if (isArmed) {
                             binding.captureButton.isEnabled = false
                             binding.armButton.isEnabled = true
@@ -416,7 +432,7 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         binding.captureButton.isEnabled = false
                         binding.armButton.isEnabled = false
-                        binding.fpsToggleButton.isEnabled = false
+                        binding.moreButton.isEnabled = false
                     }
                 }
 
@@ -531,15 +547,36 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── FPS Toggle ────────────────────────────────────────────
+    // ── More Menu ────────────────────────────────────────────
 
-    private fun onFpsTogglePressed() {
+    private fun showMoreMenu() {
+        val popup = PopupMenu(this, binding.moreButton)
+        val fpsText = if (use1920fps) getString(R.string.fps_960) else getString(R.string.fps_1920)
+        val serverOn = captureServer != null
+        popup.menu.add(0, 1, 0, "Switch to $fpsText")
+        popup.menu.add(0, 3, 1, if (serverOn) "HTTP Server: ON" else "HTTP Server: OFF")
+        if (serverOn) popup.menu.add(0, 4, 2, "HTTP Server Info")
+        popup.menu.add(0, 2, 3, "About")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> { toggleFps(); true }
+                2 -> { showAbout(); true }
+                3 -> { toggleServer(); true }
+                4 -> { showServerInfo(); true }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
+    private fun toggleFps() {
         if (!isRecordingReady && currentMode != null) {
             Toast.makeText(this, "Wait for camera to be ready", Toast.LENGTH_SHORT).show()
             return
         }
         use1920fps = !use1920fps
-        updateFpsButtonLabel()
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit().putBoolean(PREF_USE_1920FPS, use1920fps).apply()
         Log.i(TAG, "FPS toggled to $fpsLabel — recreating mode")
         releaseCamera()
         if (binding.textureView.isAvailable) {
@@ -547,11 +584,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateFpsButtonLabel() {
-        binding.fpsToggleButton.text = if (use1920fps)
-            getString(R.string.fps_1920)
-        else
-            getString(R.string.fps_960)
+    private fun showAbout() {
+        val repoUrl = "https://github.com/vilaemail/hispeed-trigger-cam-p40"
+        val version = packageManager.getPackageInfo(packageName, 0).versionName
+        AlertDialog.Builder(this)
+            .setTitle("HST Camera v$version")
+            .setMessage("High-speed trigger camera for Huawei P40.\n\n$repoUrl")
+            .setPositiveButton("Open GitHub") { _, _ ->
+                startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(repoUrl)))
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     // ── Flash Control ───────────────────────────────────────────
@@ -629,6 +673,74 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    // ── HTTP Server ────────────────────────────────────────────
+
+    private fun isServerEnabled(): Boolean {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        return prefs.getBoolean(PREF_SERVER_ENABLED, false)
+    }
+
+    private fun setServerEnabled(enabled: Boolean) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit().putBoolean(PREF_SERVER_ENABLED, enabled).apply()
+    }
+
+    private fun startCaptureServer() {
+        if (captureServer != null) return
+        try {
+            val server = CaptureServer(applicationContext, 80)
+            server.start()
+            captureServer = server
+            Log.i(TAG, "HTTP server started on port 80")
+        } catch (e: Exception) {
+            Log.w(TAG, "Port 80 failed (${e.message}), trying 8080")
+            try {
+                val server = CaptureServer(applicationContext, 8080)
+                server.start()
+                captureServer = server
+                Log.i(TAG, "HTTP server started on port 8080")
+            } catch (e2: Exception) {
+                Log.e(TAG, "Failed to start HTTP server: ${e2.message}", e2)
+            }
+        }
+    }
+
+    private fun stopCaptureServer() {
+        captureServer?.stop()
+        captureServer = null
+        Log.i(TAG, "HTTP server stopped")
+    }
+
+    private fun toggleServer() {
+        if (captureServer != null) {
+            stopCaptureServer()
+            setServerEnabled(false)
+            Toast.makeText(this, "HTTP server stopped", Toast.LENGTH_SHORT).show()
+        } else {
+            startCaptureServer()
+            setServerEnabled(true)
+            if (captureServer != null) {
+                Toast.makeText(this, "HTTP server started", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Failed to start server", Toast.LENGTH_SHORT).show()
+                setServerEnabled(false)
+            }
+        }
+    }
+
+    private fun showServerInfo() {
+        val url = captureServer?.getServerUrl()
+        if (url == null) {
+            Toast.makeText(this, "Server not running or no WiFi", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("HTTP Server")
+            .setMessage("Base URL: $url\n\nEndpoints:\n  GET /captures - list captures\n  GET /capture/<filename> - download a capture")
+            .setPositiveButton("Close", null)
+            .show()
     }
 
     // ── Helpers ─────────────────────────────────────────────────

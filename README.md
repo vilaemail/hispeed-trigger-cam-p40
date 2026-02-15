@@ -5,6 +5,7 @@ Super slow motion capture app for Huawei P40.
 1. `Capture` button: Single button captures a 0.5s burst at max FPS (up to 1920fps 720p) using Huawei CameraKit SDK. Saves to `DCIM/hispeed-trigger-cam/YYYY-MM-DD-HH-MM-SS-SSS_FFFfps.mp4`.
 2. `Arm` button: Arms for capturing and waits for key `r` from HID (i.e. USBC connected keyboard). On the keypress does the same as `Capture` button.
 3. Can toggle between 960 FPS and 1920 FPS.
+4. Opens HTTP server on either port `80` or `8080` for listing captures `/captures` and downloading a capture `/capture/filename.mp4` via HTTP GETs.
 
 ## Installing
 
