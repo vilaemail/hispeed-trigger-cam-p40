@@ -171,6 +171,53 @@
             android:layout_marginTop="16dp"
             android:layout_marginBottom="16dp" />
 
+        <!-- Clear All Recordings -->
+        <Button
+            android:id="@+id/clearRecordingsButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_clear_recordings"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#FFD32F2F"
+            android:padding="12dp" />
+
+        <TextView
+            android:id="@+id/clearRecordingsStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FFCCCCCC"
+            android:textSize="13sp"
+            android:paddingStart="8dp"
+            android:paddingTop="4dp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/clearExternalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_clear_external"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#FFD32F2F"
+            android:padding="12dp"
+            android:layout_marginTop="8dp" />
+
+        <TextView
+            android:id="@+id/clearExternalStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FFCCCCCC"
+            android:textSize="13sp"
+            android:paddingStart="8dp"
+            android:paddingTop="4dp"
+            android:visibility="gone" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#FF555555"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp" />
+
         <!-- About -->
         <TextView
             android:layout_width="wrap_content"

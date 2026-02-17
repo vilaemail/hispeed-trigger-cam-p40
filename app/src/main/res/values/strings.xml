@@ -16,6 +16,8 @@
     <string name="settings_fps">Frame Rate</string>
     <string name="settings_http_server">HTTP Server</string>
     <string name="settings_push_external">Push to External Drive</string>
+    <string name="settings_clear_recordings">Clear All Recordings</string>
+    <string name="settings_clear_external">Clear External Drive Recordings</string>
     <string name="settings_about">About</string>
     <string name="settings_github">View on GitHub</string>
 </resources>

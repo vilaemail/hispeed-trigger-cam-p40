@@ -13,6 +13,7 @@ import android.widget.RadioButton
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
@@ -66,6 +67,8 @@ class SettingsActivity : AppCompatActivity() {
         setupFps()
         setupServer()
         setupPushExternal()
+        setupClearRecordings()
+        setupClearExternal()
         setupAbout()
     }
 
@@ -215,7 +218,10 @@ class SettingsActivity : AppCompatActivity() {
                 return
             }
 
-            val srcFiles = srcDir.listFiles { f -> f.isFile && f.length() > 0 } ?: emptyArray()
+            val allowedExtensions = setOf("mp4", "json")
+            val srcFiles = srcDir.listFiles { f ->
+                f.isFile && f.length() > 0 && f.extension.lowercase() in allowedExtensions
+            } ?: emptyArray()
             if (srcFiles.isEmpty()) {
                 status("No capture files to push")
                 runOnUiThread { button.isEnabled = true }
@@ -258,6 +264,7 @@ class SettingsActivity : AppCompatActivity() {
             for (file in toCopy) {
                 val mimeType = when (file.extension.lowercase()) {
                     "mp4" -> "video/mp4"
+                    "json" -> "application/json"
                     "h265", "hevc" -> "video/hevc"
                     else -> "application/octet-stream"
                 }
@@ -291,7 +298,7 @@ class SettingsActivity : AppCompatActivity() {
                 Log.w(TAG, "sync command failed: ${e.message}")
             }
 
-            status("Done — $copied files copied (${totalBytes / 1024 / 1024} MB). Safe to unplug.")
+            status("Done — $copied files copied (${totalBytes / 1024 / 1024} MB). Wait for drive light to stop flashing before unplugging.")
 
         } catch (e: Exception) {
             Log.e(TAG, "Push failed: ${e.message}", e)
@@ -299,6 +306,109 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         runOnUiThread { button.isEnabled = true }
+    }
+
+    private fun setupClearRecordings() {
+        val clearButton = findViewById<Button>(R.id.clearRecordingsButton)
+        val clearStatus = findViewById<TextView>(R.id.clearRecordingsStatus)
+
+        clearButton.setOnClickListener {
+            val capturesDir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                CAPTURES_DIR
+            )
+            val allowedExtensions = setOf("mp4", "json")
+            val files = capturesDir.listFiles { f ->
+                f.isFile && f.extension.lowercase() in allowedExtensions
+            } ?: emptyArray()
+
+            if (files.isEmpty()) {
+                clearStatus.visibility = View.VISIBLE
+                clearStatus.text = "No recordings to delete"
+                return@setOnClickListener
+            }
+
+            AlertDialog.Builder(this)
+                .setTitle("Clear All Recordings")
+                .setMessage("Delete ${files.size} file(s) from ${capturesDir.absolutePath}?\n\nThis cannot be undone.")
+                .setPositiveButton("Delete All") { _, _ ->
+                    var deleted = 0
+                    for (file in files) {
+                        if (file.delete()) deleted++
+                    }
+                    clearStatus.visibility = View.VISIBLE
+                    clearStatus.text = "Deleted $deleted of ${files.size} files"
+                    Log.i(TAG, "Cleared recordings: $deleted/${files.size} files deleted")
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun setupClearExternal() {
+        val clearButton = findViewById<Button>(R.id.clearExternalButton)
+        val clearStatus = findViewById<TextView>(R.id.clearExternalStatus)
+
+        clearButton.setOnClickListener {
+            val savedUri = settings.externalDriveUri
+            if (savedUri == null) {
+                clearStatus.visibility = View.VISIBLE
+                clearStatus.text = "No external drive configured — push files first"
+                return@setOnClickListener
+            }
+
+            val uri = Uri.parse(savedUri)
+            val hasPermission = contentResolver.persistedUriPermissions.any {
+                it.uri == uri && it.isWritePermission
+            }
+            if (!hasPermission) {
+                settings.externalDriveUri = null
+                clearStatus.visibility = View.VISIBLE
+                clearStatus.text = "Drive access lost — push files first to re-select"
+                return@setOnClickListener
+            }
+
+            val treeDoc = DocumentFile.fromTreeUri(this, uri)
+            val destDir = treeDoc?.findFile(CAPTURES_DIR)
+            if (destDir == null || !destDir.canWrite()) {
+                clearStatus.visibility = View.VISIBLE
+                clearStatus.text = "No recordings folder found on external drive"
+                return@setOnClickListener
+            }
+
+            val allowedExtensions = setOf("mp4", "json")
+            val files = destDir.listFiles().filter { f ->
+                f.isFile && f.name?.substringAfterLast('.')?.lowercase() in allowedExtensions
+            }
+
+            if (files.isEmpty()) {
+                clearStatus.visibility = View.VISIBLE
+                clearStatus.text = "No recordings on external drive"
+                return@setOnClickListener
+            }
+
+            AlertDialog.Builder(this)
+                .setTitle("Clear External Drive Recordings")
+                .setMessage("Delete ${files.size} file(s) from external drive?\n\nThis cannot be undone.")
+                .setPositiveButton("Delete All") { _, _ ->
+                    clearButton.isEnabled = false
+                    clearStatus.visibility = View.VISIBLE
+                    clearStatus.text = "Deleting..."
+                    Thread {
+                        var deleted = 0
+                        for (file in files) {
+                            if (file.delete()) deleted++
+                        }
+                        Log.i(TAG, "Cleared external: $deleted/${files.size} files deleted")
+                        runOnUiThread {
+                            clearStatus.text = "Deleted $deleted of ${files.size} files from external drive"
+                            clearButton.isEnabled = true
+                        }
+                    }.start()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
     }
 
     private fun setupAbout() {

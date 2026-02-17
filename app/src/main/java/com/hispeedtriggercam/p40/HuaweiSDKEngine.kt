@@ -130,8 +130,15 @@ class HuaweiSDKEngine(
     override fun setFocus(focusRect: Rect) {
         val mode = currentMode ?: return
         try {
-            val rc = mode.setFocus(Metadata.FocusMode.HW_AF_TOUCH_AUTO.toInt(), focusRect)
-            Log.i(TAG, "Focus rect=$focusRect rc=$rc")
+            // Try touch AF first (mode 2)
+            var rc = mode.setFocus(Metadata.FocusMode.HW_AF_TOUCH_AUTO.toInt(), focusRect)
+            Log.i(TAG, "Focus TAF rect=$focusRect rc=$rc")
+            if (rc != 0) {
+                // Fallback: continuous AF with region (mode 1)
+                rc = mode.setFocus(Metadata.FocusMode.HW_AF_CONTINUOUS.toInt(), focusRect)
+                Log.i(TAG, "Focus CAF fallback rect=$focusRect rc=$rc")
+            }
+            // rc: 0=ok, -3=invalid/rect-transform-fail, -4=mode-not-activated-or-recording
         } catch (e: Exception) {
             Log.w(TAG, "Focus failed: ${e.message}")
         }

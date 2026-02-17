@@ -2,3 +2,4 @@
 - Support changing zoom level between wide and 1.0
 - Fix clicking on screen to focus that part of the image.
 - Fix (if possible) in each of engines such that torch (camera flash) is turned off immediatelly after recording ends (not only after processing ends)
+- Definitely know when copying to external drive is finished and let the user know.

@@ -20,9 +20,12 @@ import androidx.appcompat.app.AppCompatActivity
 import com.hispeedtriggercam.p40.databinding.ActivityMainBinding
 import android.os.Environment
 import java.io.File
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
@@ -62,9 +65,6 @@ class MainActivity : AppCompatActivity() {
 
     private var captureServer: CaptureServer? = null
 
-    // Snapshot of settings before opening SettingsActivity
-    private var preSettingsEngine = AppSettings.EngineType.CAMERA2_DIRECT
-    private var preSettingsFps = true
     private var preSettingsServer = false
 
     private val settingsLauncher = registerForActivityResult(
@@ -141,15 +141,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openSettings() {
-        preSettingsEngine = engineType
-        preSettingsFps = use1920fps
         preSettingsServer = settings.serverEnabled
         settingsLauncher.launch(Intent(this, SettingsActivity::class.java))
     }
 
     private fun onSettingsResult() {
-        val newEngine = settings.engineType
-        val newFps = settings.use1920fps
         val newServer = settings.serverEnabled
 
         // Handle server toggle
@@ -157,21 +153,10 @@ class MainActivity : AppCompatActivity() {
             if (newServer) startCaptureServer() else stopCaptureServer()
         }
 
-        // Handle engine or FPS change — need to restart camera
-        val engineChanged = newEngine != preSettingsEngine
-        val fpsChanged = newFps != preSettingsFps
-
-        engineType = newEngine
-        use1920fps = newFps
-
-        if (engineChanged || fpsChanged) {
-            Log.i(TAG, "Settings changed: engine=$engineChanged fps=$fpsChanged — restarting camera")
-            retryCount = 0
-            releaseCamera()
-            if (binding.textureView.isAvailable) {
-                createMode()
-            }
-        }
+        // Update local fields — camera will reinitialize in onResume()
+        engineType = settings.engineType
+        use1920fps = settings.use1920fps
+        retryCount = 0
     }
 
     // ── USB HID Key Handling ────────────────────────────────────
@@ -322,6 +307,10 @@ class MainActivity : AppCompatActivity() {
             val outputFile = if (file.exists() && file.length() > 0) file else currentOutputFile
             Log.i(TAG, "[${engineType.label}] RECORDING_SAVED +${elapsedMs()}ms: ${outputFile?.absolutePath}")
             updateStatus("Saved: ${outputFile?.name ?: "?"} (${(outputFile?.length() ?: 0) / 1024} KB) +${elapsedMs()}ms")
+
+            if (outputFile != null && outputFile.exists() && outputFile.length() > 0) {
+                backgroundHandler?.post { writeMetadataJson(outputFile) }
+            }
         }
 
         override fun onError(phase: String, message: String) {
@@ -445,7 +434,7 @@ class MainActivity : AppCompatActivity() {
             "hispeed-trigger-cam"
         )
         dir.mkdirs()
-        currentOutputFile = File(dir, "${timestamp}_${fpsLabel}fps.mp4")
+        currentOutputFile = File(dir, "${timestamp}.mp4")
 
         Log.i(TAG, "Starting capture to ${currentOutputFile!!.absolutePath}")
         updateStatus("Capturing...")
@@ -486,6 +475,51 @@ class MainActivity : AppCompatActivity() {
         captureServer?.stop()
         captureServer = null
         Log.i(TAG, "HTTP server stopped")
+    }
+
+    // ── Recording Metadata ─────────────────────────────────────
+
+    private fun writeMetadataJson(mp4File: File) {
+        try {
+            val sha256 = MessageDigest.getInstance("SHA-256")
+            mp4File.inputStream().use { input ->
+                val buffer = ByteArray(8192)
+                var read: Int
+                while (input.read(buffer).also { read = it } != -1) {
+                    sha256.update(buffer, 0, read)
+                }
+            }
+            val hash = sha256.digest().joinToString("") { "%02x".format(it) }
+
+            // Frame layout: 30 ramp-up @ 30fps, SSM middle, 30 ramp-down @ 30fps
+            // 1920fps: 960 middle frames, 960fps: 480 middle frames
+            val middleFrames = if (use1920fps) 960 else 480
+            val totalFrames = 30 + middleFrames + 30
+            val frames = JSONArray().apply {
+                put(JSONObject().put("count", 30).put("fps", 30))
+                put(JSONObject().put("count", middleFrames).put("fps", videoFps))
+                put(JSONObject().put("count", 30).put("fps", 30))
+            }
+
+            val json = JSONObject().apply {
+                put("engine", engineType.label)
+                put("fps", videoFps)
+                put("width", videoWidth)
+                put("height", videoHeight)
+                put("resolution", "${videoWidth}x${videoHeight}")
+                put("totalFrames", totalFrames)
+                put("frames", frames)
+                put("file", mp4File.name)
+                put("size", mp4File.length())
+                put("sha256", hash)
+            }
+
+            val jsonFile = File(mp4File.parent, mp4File.nameWithoutExtension + ".json")
+            jsonFile.writeText(json.toString(2))
+            Log.i(TAG, "Metadata written: ${jsonFile.name}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write metadata JSON: ${e.message}", e)
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────────────

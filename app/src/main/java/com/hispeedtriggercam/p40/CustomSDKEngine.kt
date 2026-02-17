@@ -143,14 +143,6 @@ class CustomSDKEngine(
         } catch (e: Exception) {
             Log.w(TAG, "Flash failed: ${e.message}")
         }
-        if (!on) {
-            try {
-                val camManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                camManager.setTorchMode(cameraId ?: "0", false)
-            } catch (e: Exception) {
-                Log.w(TAG, "Torch off fallback failed: ${e.message}")
-            }
-        }
     }
 
     /**
@@ -376,11 +368,11 @@ class CustomSDKEngine(
             when (action) {
                 1 -> listener.onRecordingReady()       // RECORDING_READY
                 2 -> listener.onRecordingStarted()     // RECORDING_STARTED
-                3 -> {
+                3 -> listener.onRecordingStopped()     // RECORDING_STOPPED
+                4 -> {
                     forceFlashOff()
-                    listener.onRecordingStopped()     // RECORDING_STOPPED
+                    listener.onRecordingFinished()    // RECORDING_COMPLETED
                 }
-                4 -> listener.onRecordingFinished()    // RECORDING_COMPLETED
                 5 -> listener.onRecordingSaved(File("")) // RECORDING_FILE_SAVED
                 -1 -> listener.onError("recording", "Unknown error")
                 -2 -> listener.onError("recording", "File I/O error")

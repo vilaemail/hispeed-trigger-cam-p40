@@ -49,7 +49,7 @@ class CaptureServer(
 
         return when {
             uri == "/captures" || uri == "/captures/" -> serveFileList(session)
-            uri.startsWith("/capture/") -> serveVideoFile(session, uri)
+            uri.startsWith("/capture/") -> serveFile(session, uri)
             uri == "/" -> {
                 val response = newFixedLengthResponse(
                     Response.Status.REDIRECT,
@@ -71,10 +71,11 @@ class CaptureServer(
 
     private fun serveFileList(session: IHTTPSession): Response {
         val dir = captureDir
+        val allowedExtensions = setOf("mp4", "json")
         val files = if (dir.exists() && dir.isDirectory) {
-            dir.listFiles { f -> f.isFile && f.name.endsWith(".mp4", ignoreCase = true) }
-                ?.sortedByDescending { it.lastModified() }
-                ?: emptyList()
+            dir.listFiles { f ->
+                f.isFile && f.extension.lowercase() in allowedExtensions
+            }?.sortedByDescending { it.lastModified() } ?: emptyList()
         } else {
             emptyList()
         }
@@ -98,7 +99,7 @@ class CaptureServer(
 
     // ── GET /capture/{filename} ─────────────────────────────
 
-    private fun serveVideoFile(session: IHTTPSession, uri: String): Response {
+    private fun serveFile(session: IHTTPSession, uri: String): Response {
         val filename = uri.removePrefix("/capture/")
 
         // Prevent path traversal
@@ -119,21 +120,27 @@ class CaptureServer(
             )
         }
 
+        val mime = when (file.extension.lowercase()) {
+            "mp4" -> MIME_MP4
+            "json" -> MIME_JSON
+            else -> "application/octet-stream"
+        }
+
         val fileLength = file.length()
         val rangeHeader = session.headers["range"]
 
         if (rangeHeader == null) {
             val fis = FileInputStream(file)
-            val response = newFixedLengthResponse(Response.Status.OK, MIME_MP4, fis, fileLength)
+            val response = newFixedLengthResponse(Response.Status.OK, mime, fis, fileLength)
             response.addHeader("Accept-Ranges", "bytes")
             response.addHeader("Content-Length", fileLength.toString())
             return response
         }
 
-        return servePartialContent(file, fileLength, rangeHeader)
+        return servePartialContent(file, fileLength, rangeHeader, mime)
     }
 
-    private fun servePartialContent(file: File, fileLength: Long, rangeHeader: String): Response {
+    private fun servePartialContent(file: File, fileLength: Long, rangeHeader: String, mime: String = MIME_MP4): Response {
         val rangeValue = rangeHeader.removePrefix("bytes=").trim()
         val parts = rangeValue.split("-", limit = 2)
 
@@ -166,7 +173,7 @@ class CaptureServer(
             skipped += fis.skip(start - skipped)
         }
 
-        val response = newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, MIME_MP4, fis, contentLength)
+        val response = newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, mime, fis, contentLength)
         response.addHeader("Content-Range", "bytes $start-$end/$fileLength")
         response.addHeader("Accept-Ranges", "bytes")
         response.addHeader("Content-Length", contentLength.toString())
