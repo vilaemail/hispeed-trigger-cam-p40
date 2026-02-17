@@ -24,9 +24,10 @@ Super slow motion capture app for Huawei P40.
 
 ## Installing
 
-- Downloading: You may download the APK from GitHub releases. For verifying GitHub release you can use the following key:
+- Downloading: You may download the APK from [GitHub releases](https://github.com/vilaemail/hispeed-trigger-cam-p40/releases/). For verifying GitHub release you can use the following key: `SHA-256: E9:55:76:8C:6A:86:6A:E7:DE:54:9A:E9:94:AA:35:73:12:6E:CC:92:67:93:04:95:08:F4:94:F8:36:78:E4:5C`
     ```
-    SHA-256: E9:55:76:8C:6A:86:6A:E7:DE:54:9A:E9:94:AA:35:73:12:6E:CC:92:67:93:04:95:08:F4:94:F8:36:78:E4:5C
+    apksigner verify --verbose --print-certs <path-to-apk>
+    adb install -r -g <path-to-apk>
     ```
 - Compiling your own: Clone the repo and build your own apk per instructions below.
 
