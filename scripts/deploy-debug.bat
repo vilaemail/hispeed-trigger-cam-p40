@@ -21,4 +21,4 @@ adb shell am start -n com.hispeedtriggercam.p40.debug/com.hispeedtriggercam.p40.
 echo Starting logcat (Ctrl+C to stop)...
 echo.
 adb logcat -c
-adb logcat -s HiSpeedTriggerCam:V
+adb logcat -s HiSpeedTriggerCam:V SSM_CAM2:V SSM_Custom:V HwRecorder:V SuperSlowRecordAction:V ModeManager:V Settings:V

@@ -72,9 +72,49 @@ android {
     }
 }
 
+// Convert patched hwcamerakit.jar (Java bytecode from dex2jar) back to dex format.
+// The dex JAR is bundled as an asset and loaded at runtime via ParentLastDexClassLoader,
+// bypassing Huawei's shared-library classloader that would shadow our patched classes.
+task dexifyPatchedJar {
+    def inputJar = rootProject.file("libs/hwcamerakit.jar")
+    def assetsDir = file("src/main/assets")
+    def outputJar = new File(assetsDir, "hwcamerakit_patched.dex.jar")
+
+    inputs.file inputJar
+    outputs.file outputJar
+
+    doLast {
+        assetsDir.mkdirs()
+
+        def sdk = android.sdkDirectory
+        def btVersion = android.buildToolsVersion
+        def isWindows = System.getProperty("os.name").toLowerCase().contains("windows")
+        def d8Exe = new File(sdk, "build-tools/${btVersion}/d8${isWindows ? '.bat' : ''}")
+        def androidJar = new File(sdk, "platforms/android-${android.compileSdk}/android.jar")
+
+        def args = [d8Exe.absolutePath]
+        if (androidJar.exists()) {
+            args += ["--lib", androidJar.absolutePath]
+        }
+        args += ["--min-api", "${android.defaultConfig.minSdk}"]
+        args += ["--output", outputJar.absolutePath]
+        args += [inputJar.absolutePath]
+
+        exec { commandLine args }
+        println "Dexified: ${inputJar.name} -> ${outputJar.name}"
+    }
+}
+preBuild.dependsOn dexifyPatchedJar
+
 dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
+    // Huawei CameraKit public SDK — used by HuaweiSDKEngine
     implementation files('libs/camerakit-1.1.3.aar')
+    // HwCameraKit system APK JAR — compile-only for CustomSDKEngine API access.
+    // At runtime, impl classes are loaded from the dexified asset via ParentLastDexClassLoader
+    // to bypass Huawei's shared-library classloader that shadows our patched version.
+    compileOnly files('../libs/hwcamerakit.jar')
     implementation 'org.nanohttpd:nanohttpd:2.3.1'
 }

@@ -1,0 +1,127 @@
+Huawei P40 Pro (ELS-NX9, Kirin 990) — Media Codec Configuration
+================================================================
+Dumped via: adb shell "cat /vendor/etc/media_codecs_performance.xml; echo '---';
+            cat /vendor/etc/media_codecs.xml; echo '---'; cat /system/etc/media_codecs.xml"
+
+NOTE: /vendor/etc/ overrides /system/etc/ — vendor values are the ACTUAL limits.
+
+=== ENCODER SUMMARY ===
+
+  OMX.hisi.video.encoder.avc (H.264)
+    Bitrate:    280 Kbps – 100 Mbps  (/vendor; /system fallback: 40 Mbps)
+    Size:       176x144 – 3840x2160
+    Alignment:  4x4
+    Block-size: 16x16
+    Blocks/sec: 99 – 979,200  (/vendor; /system: 244,800)
+    Modes:      VBR, CBR
+    Features:   vendor-hisi-slice-num
+    Concurrent: 16  (/vendor; /system: 3)
+    Perf points: 3840x2160@30, 1920x1080@60, 1280x720@120
+    Measured:   320x240@485-700, 720x480@173, 1280x720@203-237, 1920x1080@140-196 fps
+    Suggestions: Recording 1920x1080@60M@120fps, 1280x720@60M@120fps
+
+  OMX.hisi.video.encoder.hevc (H.265)
+    Bitrate:    200 Kbps – 80 Mbps  (/vendor; /system fallback: 70 Mbps)
+    Size:       176x144 – 3840x2160
+    Alignment:  4x4
+    Block-size: 16x16  (/vendor; /system: 64x64)
+    Blocks/sec: 99 – 1,958,400  (/vendor; /system: 244,800)
+    Modes:      VBR, CBR
+    Features:   vendor-hisi-slice-num
+    Concurrent: 16  (/vendor; /system: 3)
+    Perf points: 3840x2160@30, 1920x1080@60, 1280x720@120
+    Measured:   320x240@457-611, 720x480@176, 1280x720@124-125, 1920x1080@52, 3840x2160@21 fps
+    Suggestions: Recording 1920x1080@40M@120fps, 1280x720@40M@120fps
+
+
+=== /vendor/etc/media_codecs_performance.xml ===
+
+<!-- Encoder measured frame rates -->
+OMX.hisi.video.encoder.avc:
+  320x240:   485-700 fps
+  720x480:   173 fps
+  1280x720:  203-237 fps
+  1920x1080: 140-196 fps
+
+OMX.hisi.video.encoder.hevc:
+  320x240:   457-611 fps
+  720x480:   176 fps
+  1280x720:  124-125 fps
+  1920x1080: 52 fps
+  3840x2160: 21 fps
+
+<!-- Decoder measured frame rates (for reference) -->
+OMX.hisi.video.decoder.avc:   720p@247, 1080p@149
+OMX.hisi.video.decoder.hevc:  720p@267, 1080p@258, 4K@71
+
+
+=== /vendor/etc/media_codecs.xml (AUTHORITATIVE) ===
+
+<Encoders>
+    <!--config suggestion for avc -->
+    <!--VT:1280x720@1.5Mbps@30fps, 640x360@650kpbps@30fps, 640x360@350kbps@30fps-->
+    <!--DestkTop Share: 1280x720@800kbps@3-7fps, 720x450@280kbps@3-7fps-->
+    <!--Wifi Display:1920x1080@8Mbps@30fps 4Kx2k@27M@30fps-->
+    <!--Recoding:1920x1080@18Mbps@30fps, 4k2k@45Mbps@30fps, 1920x1080@60M@120fps, 1280X720@60M@120fps-->
+    <MediaCodec name="OMX.hisi.video.encoder.avc" type="video/avc" >
+        <Limit name="size" min="176x144" max="3840x2160" />
+        <Limit name="alignment" value="4x4" />
+        <Limit name="block-size" value="16x16" />
+        <Limit name="blocks-per-second" range="99-979200" />
+        <Limit name="bitrate" range="280000-100000000" />
+        <Feature name="bitrate-modes" value="VBR,CBR" />
+        <Feature name="vendor-hisi-slice-num" />
+        <Quirk name="requires-allocate-on-output-ports" />
+        <Limit name="concurrent-instances" max="16" />
+        <Limit name="performance-point-3840x2160" value="30" />
+        <Limit name="performance-point-1920x1080" value="60" />
+        <Limit name="performance-point-1280x720" value="120" />
+    </MediaCodec>
+
+    <!--config suggestion for hevc -->
+    <!--VT:1280x720@1Mbps@30fps, 640x360@450kpbps@30fps, 640x360@250kbps@30fps, 640x360@170kbps@15fps-->
+    <!--DestkTop Share: 1280x720@500kbps@3-7fps, 720x450@200kbps@3-7fps-->
+    <!--Wifi Display:1920x1080@8Mbps@30fps 4Kx2k@27M@30fps-->
+    <!--Recoding:1920x1080@12Mbps@30fps, 4k2k@30Mbps@30fps, 1920x1080@40M@120fps, 1280X720@40M@120fps-->
+    <MediaCodec name="OMX.hisi.video.encoder.hevc" type="video/hevc" >
+        <Limit name="size" min="176x144" max="3840x2160" />
+        <Limit name="alignment" value="4x4" />
+        <Limit name="block-size" value="16x16" />
+        <Limit name="blocks-per-second" range="99-1958400" />
+        <Limit name="bitrate" range="200000-80000000" />
+        <Feature name="bitrate-modes" value="VBR,CBR" />
+        <Feature name="vendor-hisi-slice-num" />
+        <Quirk name="requires-allocate-on-output-ports" />
+        <Limit name="concurrent-instances" max="16" />
+        <Limit name="performance-point-3840x2160" value="30" />
+        <Limit name="performance-point-1920x1080" value="60" />
+        <Limit name="performance-point-1280x720" value="120" />
+    </MediaCodec>
+</Encoders>
+
+
+=== /system/etc/media_codecs.xml (FALLBACK — lower limits, overridden by vendor) ===
+
+<Encoders>
+    <!--Recoding:1920x1080@18Mbps@30fps, 4k2k@45Mbps@30fps, 1920x1080@70M@120fps, 1280X720@70M@120fps-->
+    <MediaCodec name="OMX.hisi.video.encoder.avc" type="video/avc" >
+        <Limit name="size" min="176x144" max="3840x2160" />
+        <Limit name="alignment" value="4x4" />
+        <Limit name="block-size" value="16x16" />
+        <Limit name="blocks-per-second" range="99-244800" />
+        <Limit name="bitrate" range="280000-40000000" />
+        <Quirk name="requires-allocate-on-output-ports" />
+        <Limit name="concurrent-instances" max="3" />
+    </MediaCodec>
+
+    <!--Recoding:1920x1080@12Mbps@30fps, 4k2k@30Mbps@30fps, 1920x1080@40M@120fps, 1280X720@40M@120fps-->
+    <MediaCodec name="OMX.hisi.video.encoder.hevc" type="video/hevc" >
+        <Limit name="size" min="176x144" max="3840x2160" />
+        <Limit name="alignment" value="4x4" />
+        <Limit name="block-size" value="64x64" />
+        <Limit name="blocks-per-second" range="99-244800" />
+        <Limit name="bitrate" range="200000-70000000" />
+        <Quirk name="requires-allocate-on-output-ports" />
+        <Limit name="concurrent-instances" max="3" />
+    </MediaCodec>
+</Encoders>

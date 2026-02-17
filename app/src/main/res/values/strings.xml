@@ -8,4 +8,14 @@
     <string name="more">MORE</string>
     <string name="fps_960">960fps 1080p</string>
     <string name="fps_1920">1920fps 720p</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_engine">Engine</string>
+    <string name="engine_huawei_sdk">Huawei CameraKit SDK</string>
+    <string name="engine_camera2_direct">Camera2 Direct (vendor tags)</string>
+    <string name="engine_custom_sdk">Patched HwCameraKit</string>
+    <string name="settings_fps">Frame Rate</string>
+    <string name="settings_http_server">HTTP Server</string>
+    <string name="settings_push_external">Push to External Drive</string>
+    <string name="settings_about">About</string>
+    <string name="settings_github">View on GitHub</string>
 </resources>

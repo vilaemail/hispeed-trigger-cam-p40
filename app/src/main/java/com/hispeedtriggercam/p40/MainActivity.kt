@@ -1,6 +1,7 @@
 package com.hispeedtriggercam.p40
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
@@ -13,16 +14,10 @@ import android.util.Size
 import android.view.KeyEvent
 import android.view.Surface
 import android.view.TextureView
-import android.widget.PopupMenu
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.hispeedtriggercam.p40.databinding.ActivityMainBinding
-import com.huawei.camera.camerakit.ActionStateCallback
-import com.huawei.camera.camerakit.CameraKit
-import com.huawei.camera.camerakit.Metadata
-import com.huawei.camera.camerakit.Mode
-import com.huawei.camera.camerakit.ModeStateCallback
 import android.os.Environment
 import java.io.File
 import java.text.SimpleDateFormat
@@ -33,23 +28,27 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "HiSpeedTriggerCam"
-        private const val CURRENT_MODE_TYPE = Mode.Type.SUPER_SLOW_MOTION
-        private const val PREFS_NAME = "hst_camera_prefs"
-        private const val PREF_SERVER_ENABLED = "http_server_enabled"
-        private const val PREF_USE_1920FPS = "use_1920fps"
+        private const val MAX_RETRIES = 3
+        private const val RETRY_DELAY_MS = 1000L
+        private val RETRYABLE_PHASES = setOf(
+            "configure", "createMode", "fatal", "sessionConfig",
+            "createSession", "cameraDevice", "openCamera", "startPreview"
+        )
     }
 
+    // ── State ───────────────────────────────────────────────────
+
+    private lateinit var binding: ActivityMainBinding
+    private lateinit var settings: AppSettings
+
+    private var engineType = AppSettings.EngineType.CAMERA2_DIRECT
     private var use1920fps = true
-    private val videoFps get() = if (use1920fps) Metadata.FpsRange.HW_FPS_1920 else Metadata.FpsRange.HW_FPS_960
+    private val videoFps get() = if (use1920fps) 1920 else 960
     private val videoWidth get() = if (use1920fps) 1280 else 1920
     private val videoHeight get() = if (use1920fps) 720 else 1080
     private val fpsLabel get() = if (use1920fps) "1920" else "960"
 
-    private lateinit var binding: ActivityMainBinding
-
-    private var cameraKit: CameraKit? = null
-    private var currentMode: Mode? = null
-    private var cameraId: String? = null
+    private var engine: SSMEngine? = null
     private var previewSurface: Surface? = null
     private var isRecordingReady = false
     private var isArmed = false
@@ -59,10 +58,20 @@ class MainActivity : AppCompatActivity() {
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
-    private var callbackThread: HandlerThread? = null
-    private var callbackHandler: Handler? = null
+    private var retryCount = 0
 
     private var captureServer: CaptureServer? = null
+
+    // Snapshot of settings before opening SettingsActivity
+    private var preSettingsEngine = AppSettings.EngineType.CAMERA2_DIRECT
+    private var preSettingsFps = true
+    private var preSettingsServer = false
+
+    private val settingsLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        onSettingsResult()
+    }
 
     // ── Lifecycle ───────────────────────────────────────────────
 
@@ -71,15 +80,15 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        use1920fps = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getBoolean(PREF_USE_1920FPS, true)
+        settings = AppSettings(this)
+        loadSettings()
 
         binding.captureButton.setOnClickListener { onCapturePressed() }
         binding.armButton.setOnClickListener { onArmPressed() }
-        binding.moreButton.setOnClickListener { showMoreMenu() }
+        binding.moreButton.setOnClickListener { openSettings() }
         binding.textureView.surfaceTextureListener = surfaceTextureListener
         setupTapToFocus()
-        if (isServerEnabled()) startCaptureServer()
+        if (settings.serverEnabled) startCaptureServer()
     }
 
     override fun onResume() {
@@ -124,6 +133,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ── Settings ─────────────────────────────────────────────────
+
+    private fun loadSettings() {
+        engineType = settings.engineType
+        use1920fps = settings.use1920fps
+    }
+
+    private fun openSettings() {
+        preSettingsEngine = engineType
+        preSettingsFps = use1920fps
+        preSettingsServer = settings.serverEnabled
+        settingsLauncher.launch(Intent(this, SettingsActivity::class.java))
+    }
+
+    private fun onSettingsResult() {
+        val newEngine = settings.engineType
+        val newFps = settings.use1920fps
+        val newServer = settings.serverEnabled
+
+        // Handle server toggle
+        if (newServer != preSettingsServer) {
+            if (newServer) startCaptureServer() else stopCaptureServer()
+        }
+
+        // Handle engine or FPS change — need to restart camera
+        val engineChanged = newEngine != preSettingsEngine
+        val fpsChanged = newFps != preSettingsFps
+
+        engineType = newEngine
+        use1920fps = newFps
+
+        if (engineChanged || fpsChanged) {
+            Log.i(TAG, "Settings changed: engine=$engineChanged fps=$fpsChanged — restarting camera")
+            retryCount = 0
+            releaseCamera()
+            if (binding.textureView.isAvailable) {
+                createMode()
+            }
+        }
+    }
+
     // ── USB HID Key Handling ────────────────────────────────────
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -143,8 +193,6 @@ class MainActivity : AppCompatActivity() {
     private fun startBackgroundThreads() {
         backgroundThread = HandlerThread("CameraBackground").also { it.start() }
         backgroundHandler = Handler(backgroundThread!!.looper)
-        callbackThread = HandlerThread("CameraCallback").also { it.start() }
-        callbackHandler = Handler(callbackThread!!.looper)
     }
 
     private fun stopBackgroundThreads() {
@@ -152,20 +200,17 @@ class MainActivity : AppCompatActivity() {
         try { backgroundThread?.join() } catch (_: InterruptedException) {}
         backgroundThread = null
         backgroundHandler = null
-
-        callbackThread?.quitSafely()
-        try { callbackThread?.join() } catch (_: InterruptedException) {}
-        callbackThread = null
-        callbackHandler = null
     }
+
+    // ── Engine Lifecycle ────────────────────────────────────────
 
     private fun releaseCamera() {
         try {
-            currentMode?.release()
+            engine?.release()
         } catch (e: Exception) {
-            Log.w(TAG, "Error releasing mode: ${e.message}")
+            Log.w(TAG, "Error releasing engine: ${e.message}")
         }
-        currentMode = null
+        engine = null
         isRecordingReady = false
         isArmed = false
         previewSurface?.release()
@@ -174,6 +219,134 @@ class MainActivity : AppCompatActivity() {
             binding.armButton.text = getString(R.string.arm)
             binding.armButton.isEnabled = false
             binding.captureButton.isEnabled = false
+        }
+    }
+
+    private fun createMode() {
+        if (engine != null) return
+        val handler = backgroundHandler ?: return
+
+        Log.i(TAG, "Creating engine: ${engineType.label}")
+        updateStatus("Starting ${engineType.label}...")
+
+        val videoSize = Size(videoWidth, videoHeight)
+        val surfaceTexture = binding.textureView.surfaceTexture
+        if (surfaceTexture == null) {
+            Log.e(TAG, "SurfaceTexture is null")
+            updateStatus("ERROR: No surface")
+            return
+        }
+        surfaceTexture.setDefaultBufferSize(videoSize.width, videoSize.height)
+        configureTransform(videoSize)
+        previewSurface = Surface(surfaceTexture)
+
+        val camManager = getSystemService(CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+        val cameraIds = camManager.cameraIdList
+        if (cameraIds.isEmpty()) {
+            Log.e(TAG, "No cameras found")
+            updateStatus("ERROR: No cameras")
+            return
+        }
+        val cameraId = cameraIds[0]
+
+        val newEngine = when (engineType) {
+            AppSettings.EngineType.HUAWEI_SDK ->
+                HuaweiSDKEngine(applicationContext, handler, engineListener)
+            AppSettings.EngineType.CAMERA2_DIRECT -> {
+                val e = Camera2DirectEngine(applicationContext, handler, engineListener)
+                e.targetBitrate = 12_000_000
+                e.useHevc = false
+                e.outputFrameRate = 30
+                e
+            }
+            AppSettings.EngineType.CUSTOM_SDK ->
+                CustomSDKEngine(applicationContext, handler, engineListener)
+        }
+        engine = newEngine
+
+        handler.post {
+            newEngine.open(cameraId, previewSurface!!, videoFps, videoWidth, videoHeight)
+        }
+    }
+
+    // ── Engine Listener (routes callbacks to UI) ────────────────
+
+    private val engineListener = object : SSMEngine.Listener {
+        override fun onPreviewStarted() {
+            Log.i(TAG, "[${engineType.label}] Preview started")
+            updateStatus("Preview active — waiting for ready...")
+        }
+
+        override fun onRecordingReady() {
+            Log.i(TAG, "[${engineType.label}] RECORDING_READY +${elapsedMs()}ms")
+            retryCount = 0
+            if (!recordedFromArmedMode) {
+                engine?.setFlash(false)
+            }
+            isRecordingReady = true
+            runOnUiThread {
+                binding.moreButton.isEnabled = true
+                if (isArmed) {
+                    binding.captureButton.isEnabled = false
+                    binding.armButton.isEnabled = true
+                    updateStatus("Armed — waiting for trigger... +${elapsedMs()}ms")
+                } else {
+                    binding.captureButton.isEnabled = true
+                    binding.armButton.isEnabled = true
+                    updateStatus("Ready — press CAPTURE +${elapsedMs()}ms")
+                }
+            }
+        }
+
+        override fun onRecordingStarted() {
+            Log.i(TAG, "[${engineType.label}] RECORDING_STARTED +${elapsedMs()}ms")
+            updateStatus("Recording... +${elapsedMs()}ms")
+            runOnUiThread {
+                binding.captureButton.isEnabled = false
+                binding.armButton.isEnabled = false
+                binding.moreButton.isEnabled = false
+            }
+        }
+
+        override fun onRecordingStopped() {
+            Log.i(TAG, "[${engineType.label}] RECORDING_STOPPED +${elapsedMs()}ms")
+            updateStatus("Processing... +${elapsedMs()}ms")
+        }
+
+        override fun onRecordingFinished() {
+            Log.i(TAG, "[${engineType.label}] RECORDING_FINISHED +${elapsedMs()}ms")
+            updateStatus("Saving... +${elapsedMs()}ms")
+        }
+
+        override fun onRecordingSaved(file: File) {
+            val outputFile = if (file.exists() && file.length() > 0) file else currentOutputFile
+            Log.i(TAG, "[${engineType.label}] RECORDING_SAVED +${elapsedMs()}ms: ${outputFile?.absolutePath}")
+            updateStatus("Saved: ${outputFile?.name ?: "?"} (${(outputFile?.length() ?: 0) / 1024} KB) +${elapsedMs()}ms")
+        }
+
+        override fun onError(phase: String, message: String) {
+            Log.e(TAG, "[${engineType.label}] ERROR [$phase]: $message")
+
+            if (phase in RETRYABLE_PHASES && retryCount < MAX_RETRIES) {
+                retryCount++
+                Log.i(TAG, "Retrying engine (attempt $retryCount/$MAX_RETRIES) after $phase failure...")
+                updateStatus("Retry $retryCount/$MAX_RETRIES after $phase error...")
+                releaseCamera()
+                backgroundHandler?.postDelayed({
+                    runOnUiThread {
+                        if (binding.textureView.isAvailable) {
+                            createMode()
+                        }
+                    }
+                }, RETRY_DELAY_MS)
+            } else {
+                updateStatus("ERROR [$phase]: $message")
+                runOnUiThread {
+                    binding.captureButton.isEnabled = isRecordingReady
+                    binding.armButton.isEnabled = true
+                    binding.moreButton.isEnabled = true
+                }
+            }
         }
     }
 
@@ -191,434 +364,58 @@ class MainActivity : AppCompatActivity() {
         override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
     }
 
-    // ── CameraKit Mode Creation ─────────────────────────────────
-
-    private fun createMode() {
-        if (currentMode != null) return
-
-        cameraKit = CameraKit.getInstance(applicationContext)
-        if (cameraKit == null) {
-            Log.e(TAG, "CameraKit.getInstance() returned null - not supported on this device")
-            updateStatus("ERROR: CameraKit not supported")
-            return
-        }
-
-        val cameraIds = cameraKit!!.cameraIdList
-        if (cameraIds.isNullOrEmpty()) {
-            Log.e(TAG, "No cameras found")
-            updateStatus("ERROR: No cameras")
-            return
-        }
-        cameraId = cameraIds[0]
-        Log.i(TAG, "Using camera: $cameraId")
-
-        val supportedModes = cameraKit!!.getSupportedModes(cameraId)
-        if (supportedModes == null || !supportedModes.contains(CURRENT_MODE_TYPE)) {
-            Log.e(TAG, "SUPER_SLOW_MOTION not in supported modes: ${supportedModes?.toList()}")
-            updateStatus("ERROR: Super slow-mo not supported")
-            return
-        }
-
-        updateStatus("Creating super slow-mo mode...")
-        val handler = backgroundHandler ?: return
-        cameraKit!!.createMode(cameraId!!, CURRENT_MODE_TYPE, modeStateCallback, handler)
-    }
-
-    // ── Mode State Callback ─────────────────────────────────────
-
-    private val modeStateCallback = object : ModeStateCallback() {
-        override fun onCreated(mode: Mode) {
-            Log.i(TAG, "Mode created")
-            currentMode = mode
-            configureMode()
-        }
-
-        override fun onCreateFailed(cameraId: String, errorCode: Int, errorCode2: Int) {
-            Log.e(TAG, "Mode creation failed: camera=$cameraId error=$errorCode/$errorCode2")
-            updateStatus("ERROR: Mode creation failed ($errorCode)")
-        }
-
-        override fun onConfigured(mode: Mode) {
-            Log.i(TAG, "Mode configured - starting preview")
-            currentMode?.startPreview()
-            updateStatus("Preview active - waiting for ready...")
-        }
-
-        override fun onConfigureFailed(mode: Mode, errorCode: Int) {
-            Log.e(TAG, "Mode configuration failed: $errorCode — retrying in 3s")
-            updateStatus("Configuration failed ($errorCode) — retrying...")
-            backgroundHandler?.postDelayed({
-                Log.i(TAG, "Retrying after configuration failure — full recreate")
-                releaseCamera()
-                createMode()
-            }, 3000)
-        }
-
-        override fun onFatalError(mode: Mode, errorCode: Int) {
-            Log.e(TAG, "Fatal camera error: $errorCode")
-            updateStatus("ERROR: Fatal ($errorCode)")
-            releaseCamera()
-        }
-
-        override fun onReleased(mode: Mode) {
-            Log.i(TAG, "Mode released")
-        }
-    }
-
-    // ── Mode Configuration ──────────────────────────────────────
-
-    private fun configureMode() {
-        val mode = currentMode ?: return
-        val kit = cameraKit ?: return
-        val camId = cameraId ?: return
-
-        try {
-            val chars = kit.getModeCharacteristics(camId, CURRENT_MODE_TYPE)
-
-            val videoSizeMap = chars.getSupportedVideoSizes(android.media.MediaRecorder::class.java)
-            val previewSizes = chars.getSupportedPreviewSizes(SurfaceTexture::class.java)
-            Log.i(TAG, "Supported video FPS keys: ${videoSizeMap?.keys}, preview sizes: $previewSizes")
-
-            if (videoSizeMap == null || !videoSizeMap.containsKey(videoFps)) {
-                Log.e(TAG, "Required FPS $videoFps not supported. Available: ${videoSizeMap?.keys}")
-                updateStatus("ERROR: ${fpsLabel}fps not supported")
-                return
-            }
-
-            val sizes = videoSizeMap[videoFps]!!
-            val hasVideoSize = sizes.any { it.width == videoWidth && it.height == videoHeight }
-            if (!hasVideoSize) {
-                Log.e(TAG, "Required video size ${videoWidth}x${videoHeight} not supported. Available: $sizes")
-                updateStatus("ERROR: ${videoWidth}x${videoHeight} not supported")
-                return
-            }
-
-            // ── Debug dump: all FPS → sizes ──
-            for ((fps, szList) in videoSizeMap) {
-                Log.i(TAG, "DEBUG videoSizes[$fps] = ${szList.map { "${it.width}x${it.height}" }}")
-            }
-            Log.i(TAG, "DEBUG previewSizes = ${previewSizes?.map { "${it.width}x${it.height}" }}")
-
-            // ── Debug dump: supported CaptureRequest parameters ──
-            val supportedParams = chars.getSupportedParameters()
-            if (supportedParams.isNullOrEmpty()) {
-                Log.i(TAG, "DEBUG supportedParameters: NONE")
-            } else {
-                for (key in supportedParams) {
-                    Log.i(TAG, "DEBUG supportedParam: ${key.name}")
-                }
-            }
-
-            // ── Debug dump: supported flash, focus, color, etc. ──
-            Log.i(TAG, "DEBUG supportedFlash: ${chars.getSupportedFlashMode()?.toList()}")
-            Log.i(TAG, "DEBUG supportedAutoFocus: ${chars.getSupportedAutoFocus()?.toList()}")
-            Log.i(TAG, "DEBUG supportedZoom: ${chars.getSupportedZoom()?.toList()}")
-            Log.i(TAG, "DEBUG supportedColorMode: ${chars.getSupportedColorMode()?.toList()}")
-            Log.i(TAG, "DEBUG supportedFaceDetection: ${chars.getSupportedFaceDetection()?.toList()}")
-            Log.i(TAG, "DEBUG supportedSceneDetection: ${chars.getSupportedSceneDetection()}")
-            Log.i(TAG, "DEBUG conflictActions: ${chars.getConflictActions()}")
-            Log.i(TAG, "DEBUG isVideoSupported: ${chars.isVideoSupported}")
-            Log.i(TAG, "DEBUG isCaptureSupported: ${chars.isCaptureSupported}")
-            Log.i(TAG, "DEBUG isBurstSupported: ${chars.isBurstSupported}")
-
-            // ── Debug dump: parameter ranges for known RequestKeys ──
-            try {
-                val requestKeys = listOf(
-                    com.huawei.camera.camerakit.RequestKey.HW_SUPER_SLOW_CHECK_AREA,
-                    com.huawei.camera.camerakit.RequestKey.HW_VIDEO_STABILIZATION,
-                    com.huawei.camera.camerakit.RequestKey.HW_AI_MOVIE,
-                    com.huawei.camera.camerakit.RequestKey.HW_SENSOR_HDR,
-                    com.huawei.camera.camerakit.RequestKey.HW_FILTER_EFFECT,
-                    com.huawei.camera.camerakit.RequestKey.HW_SCENE_EFFECT_ENABLE,
-                    com.huawei.camera.camerakit.RequestKey.HW_PRO_SENSOR_ISO_VALUE,
-                    com.huawei.camera.camerakit.RequestKey.HW_PRO_SENSOR_EXPOSURE_TIME_VALUE,
-                    com.huawei.camera.camerakit.RequestKey.HW_EXPOSURE_COMPENSATION_VALUE,
-                )
-                for (key in requestKeys) {
-                    try {
-                        val range = chars.getParameterRange(key)
-                        Log.i(TAG, "DEBUG paramRange[${key.name}] = $range")
-                    } catch (e: Exception) {
-                        Log.i(TAG, "DEBUG paramRange[${key.name}] = ERROR: ${e.message}")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "DEBUG RequestKey dump failed: ${e.message}")
-            }
-
-            val videoSize = Size(videoWidth, videoHeight)
-            val previewSize = Size(videoWidth, videoHeight)
-            Log.i(TAG, "Using video=${videoSize.width}x${videoSize.height} preview=${previewSize.width}x${previewSize.height} @ ${fpsLabel}fps")
-            updateStatus("Configuring ${videoSize.width}x${videoSize.height} @ ${fpsLabel}fps...")
-
-            val surfaceTexture = binding.textureView.surfaceTexture
-            if (surfaceTexture == null) {
-                Log.e(TAG, "SurfaceTexture is null")
-                updateStatus("ERROR: No surface")
-                return
-            }
-            surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
-            configureTransform(previewSize)
-            previewSurface = Surface(surfaceTexture)
-
-            val configBuilder = mode.modeConfigBuilder
-            val handler = callbackHandler ?: return
-            val surface = previewSurface ?: return
-            configBuilder.setStateCallback(actionStateCallback, handler)
-            configBuilder.setVideoFps(videoFps)
-            configBuilder.addVideoSize(videoSize)
-            configBuilder.addPreviewSurface(surface)
-
-            mode.configure()
-            Log.i(TAG, "Mode.configure() called")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Configuration error: ${e.message}", e)
-            updateStatus("ERROR: ${e.message}")
-        }
-    }
-
-    // ── Action State Callback (Recording Lifecycle) ─────────────
-
-    private val actionStateCallback = object : ActionStateCallback() {
-        override fun onFocus(
-            mode: Mode,
-            state: Int,
-            result: ActionStateCallback.FocusResult?
-        ) {
-            Log.i(TAG, "onFocus state=$state result=$result")
-            when (state) {
-                FocusResult.State.FOCUS_SUCCEED -> Log.i(TAG, "Focus: SUCCEED")
-                FocusResult.State.FOCUS_FAILED -> Log.i(TAG, "Focus: FAILED")
-                FocusResult.State.FOCUS_MOVING -> Log.i(TAG, "Focus: MOVING")
-                FocusResult.State.FOCUS_LOCKED -> Log.i(TAG, "Focus: LOCKED")
-                FocusResult.State.FOCUS_MODE_CHANGED -> Log.i(TAG, "Focus: MODE_CHANGED")
-                FocusResult.State.ERROR_UNKNOWN -> Log.i(TAG, "Focus: ERROR_UNKNOWN")
-                else -> Log.i(TAG, "Focus: unknown state=$state")
-            }
-        }
-
-        override fun onRecording(
-            mode: Mode,
-            state: Int,
-            result: ActionStateCallback.RecordingResult?
-        ) {
-            Log.i(TAG, "onRecording state=$state result=$result")
-
-            when (state) {
-                ActionStateCallback.RecordingResult.State.RECORDING_READY -> {
-                    Log.i(TAG, "RECORDING_READY +${elapsedMs()}ms")
-                    if (!recordedFromArmedMode) {
-                        setFlash(false)
-                    }
-                    isRecordingReady = true
-                    runOnUiThread {
-                        binding.moreButton.isEnabled = true
-                        if (isArmed) {
-                            binding.captureButton.isEnabled = false
-                            binding.armButton.isEnabled = true
-                            updateStatus("Armed - waiting for trigger... +${elapsedMs()}ms")
-                        } else {
-                            binding.captureButton.isEnabled = true
-                            binding.armButton.isEnabled = true
-                            updateStatus("Ready - press CAPTURE +${elapsedMs()}ms")
-                        }
-                    }
-                }
-
-                ActionStateCallback.RecordingResult.State.RECORDING_STARTED -> {
-                    Log.i(TAG, "RECORDING_STARTED +${elapsedMs()}ms")
-                    updateStatus("Recording... +${elapsedMs()}ms")
-                    runOnUiThread {
-                        binding.captureButton.isEnabled = false
-                        binding.armButton.isEnabled = false
-                        binding.moreButton.isEnabled = false
-                    }
-                }
-
-                ActionStateCallback.RecordingResult.State.RECORDING_STOPPED -> {
-                    Log.i(TAG, "RECORDING_STOPPED +${elapsedMs()}ms")
-                    updateStatus("Processing... +${elapsedMs()}ms")
-                }
-
-                ActionStateCallback.RecordingResult.State.RECORDING_COMPLETED -> {
-                    Log.i(TAG, "RECORDING_COMPLETED +${elapsedMs()}ms")
-                    updateStatus("Saving... +${elapsedMs()}ms")
-                }
-
-                ActionStateCallback.RecordingResult.State.RECORDING_FILE_SAVED -> {
-                    val file = currentOutputFile
-                    Log.i(TAG, "RECORDING_FILE_SAVED +${elapsedMs()}ms: ${file?.absolutePath}")
-                    updateStatus("Saved: ${file?.name ?: "unknown"} +${elapsedMs()}ms")
-                }
-
-                ActionStateCallback.RecordingResult.State.ERROR_RECORDING_NOT_READY -> {
-                    Log.w(TAG, "ERROR_RECORDING_NOT_READY")
-                    updateStatus("Not ready yet...")
-                }
-
-                ActionStateCallback.RecordingResult.State.ERROR_FILE_IO -> {
-                    Log.e(TAG, "ERROR_FILE_IO")
-                    updateStatus("ERROR: File I/O error")
-                    isRecordingReady = true
-                    runOnUiThread {
-                        if (isArmed) {
-                            binding.armButton.isEnabled = true
-                        } else {
-                            binding.captureButton.isEnabled = true
-                            binding.armButton.isEnabled = true
-                        }
-                    }
-                }
-
-                ActionStateCallback.RecordingResult.State.ERROR_UNKNOWN -> {
-                    Log.e(TAG, "ERROR_UNKNOWN")
-                    updateStatus("ERROR: Unknown recording error")
-                    isRecordingReady = true
-                    runOnUiThread {
-                        if (isArmed) {
-                            binding.armButton.isEnabled = true
-                        } else {
-                            binding.captureButton.isEnabled = true
-                            binding.armButton.isEnabled = true
-                        }
-                    }
-                }
-
-                else -> {
-                    Log.d(TAG, "Unknown recording state: $state")
-                }
-            }
-        }
-    }
-
     // ── Tap to Focus ────────────────────────────────────────────
 
     @SuppressLint("ClickableViewAccessibility")
     private fun setupTapToFocus() {
         binding.textureView.setOnTouchListener { v, event ->
-            if (event.action == MotionEvent.ACTION_UP && currentMode != null) {
-                val viewW = v.width.toFloat()
-                val viewH = v.height.toFloat()
-                // Sensor is landscape, phone is portrait (90° rotation)
-                // Touch X (left→right) maps to sensor Y (-1000→1000)
-                // Touch Y (top→bottom) maps to sensor X (1000→-1000, inverted)
-                val sensorX = (1000 - (event.y / viewH) * 2000).toInt()
-                val sensorY = ((event.x / viewW) * 2000 - 1000).toInt()
-                val halfSide = 100
-                val rect = Rect(
-                    (sensorX - halfSide).coerceIn(-1000, 1000),
-                    (sensorY - halfSide).coerceIn(-1000, 1000),
-                    (sensorX + halfSide).coerceIn(-1000, 1000),
-                    (sensorY + halfSide).coerceIn(-1000, 1000)
-                )
-                try {
-                    val rc = currentMode!!.setFocus(
-                        Metadata.FocusMode.HW_AF_TOUCH_AUTO.toInt(), rect
-                    )
-                    Log.i(TAG, "Tap-to-focus touch=(${event.x.toInt()},${event.y.toInt()}) sensor=($sensorX,$sensorY) rect=$rect rc=$rc")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Tap-to-focus failed: ${e.message}")
-                }
+            if (event.action == MotionEvent.ACTION_UP && engine != null) {
+                val focusRect = touchToFocusRect(event.x, event.y, v.width, v.height)
+                Log.i(TAG, "Tap-to-focus touch=(${event.x.toInt()},${event.y.toInt()}) rect=$focusRect")
+                engine?.setFocus(focusRect)
             }
             true
         }
+    }
+
+    /**
+     * Convert a touch point in preview (screen) coordinates to a focus Rect
+     * in the CameraKit center coordinate system: [-1000, 1000] on both axes.
+     *
+     * The camera sensor is landscape while the phone is portrait, so there's a 90° rotation:
+     *   center_x = preview_y * 2000 / previewHeight - 1000
+     *   center_y = 1000 - preview_x * 2000 / previewWidth
+     * (Matches the transformation in the Huawei CameraKit SSM example.)
+     */
+    private fun touchToFocusRect(touchX: Float, touchY: Float, viewW: Int, viewH: Int): Rect {
+        val halfSide = 100
+        val centerX = (touchY * 2000f / viewH - 1000f).toInt()
+        val centerY = (1000f - touchX * 2000f / viewW).toInt()
+        return Rect(
+            (centerX - halfSide).coerceIn(-1000, 1000),
+            (centerY - halfSide).coerceIn(-1000, 1000),
+            (centerX + halfSide).coerceIn(-1000, 1000),
+            (centerY + halfSide).coerceIn(-1000, 1000)
+        )
     }
 
     // ── Arm / Unarm ─────────────────────────────────────────────
 
     private fun onArmPressed() {
         if (isArmed) {
-            // Unarm
             isArmed = false
-            setFlash(false)
+            engine?.setFlash(false)
             binding.armButton.text = getString(R.string.arm)
             if (isRecordingReady) {
                 binding.captureButton.isEnabled = true
             }
-            updateStatus(if (isRecordingReady) "Ready - press CAPTURE" else "Waiting for ready...")
+            updateStatus(if (isRecordingReady) "Ready — press CAPTURE" else "Waiting for ready...")
         } else {
-            // Arm
             isArmed = true
-            setFlash(true)
+            engine?.setFlash(true)
             binding.armButton.text = getString(R.string.unarm)
             binding.captureButton.isEnabled = false
-            updateStatus("Armed - waiting for trigger...")
-        }
-    }
-
-    // ── More Menu ────────────────────────────────────────────
-
-    private fun showMoreMenu() {
-        val popup = PopupMenu(this, binding.moreButton)
-        val fpsText = if (use1920fps) getString(R.string.fps_960) else getString(R.string.fps_1920)
-        val serverOn = captureServer != null
-        popup.menu.add(0, 1, 0, "Switch to $fpsText")
-        popup.menu.add(0, 3, 1, if (serverOn) "HTTP Server: ON" else "HTTP Server: OFF")
-        if (serverOn) popup.menu.add(0, 4, 2, "HTTP Server Info")
-        popup.menu.add(0, 2, 3, "About")
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                1 -> { toggleFps(); true }
-                2 -> { showAbout(); true }
-                3 -> { toggleServer(); true }
-                4 -> { showServerInfo(); true }
-                else -> false
-            }
-        }
-        popup.show()
-    }
-
-    private fun toggleFps() {
-        if (!isRecordingReady && currentMode != null) {
-            Toast.makeText(this, "Wait for camera to be ready", Toast.LENGTH_SHORT).show()
-            return
-        }
-        use1920fps = !use1920fps
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .edit().putBoolean(PREF_USE_1920FPS, use1920fps).apply()
-        Log.i(TAG, "FPS toggled to $fpsLabel — recreating mode")
-        releaseCamera()
-        if (binding.textureView.isAvailable) {
-            createMode()
-        }
-    }
-
-    private fun showAbout() {
-        val repoUrl = "https://github.com/vilaemail/hispeed-trigger-cam-p40"
-        val version = packageManager.getPackageInfo(packageName, 0).versionName
-        AlertDialog.Builder(this)
-            .setTitle("HST Camera v$version")
-            .setMessage("High-speed trigger camera for Huawei P40.\n\n$repoUrl")
-            .setPositiveButton("Open GitHub") { _, _ ->
-                startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
-                    android.net.Uri.parse(repoUrl)))
-            }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-    // ── Flash Control ───────────────────────────────────────────
-
-    private fun setFlash(on: Boolean) {
-        try {
-            val mode = currentMode ?: return
-            val rc = mode.setFlashMode(
-                if (on) Metadata.FlashMode.HW_FLASH_ALWAYS_OPEN.toInt()
-                else Metadata.FlashMode.HW_FLASH_CLOSE.toInt()
-            )
-            Log.i(TAG, "Flash ${if (on) "ON" else "OFF"} (CameraKit rc=$rc)")
-        } catch (e: Exception) {
-            Log.w(TAG, "CameraKit flash failed: ${e.message}")
-        }
-        if (!on) {
-            try {
-                val camManager = getSystemService(android.content.Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
-                camManager.setTorchMode(cameraId ?: "0", false)
-                Log.i(TAG, "Flash OFF (CameraManager fallback)")
-            } catch (e: Exception) {
-                Log.w(TAG, "CameraManager torch off failed: ${e.message}")
-            }
+            updateStatus("Armed — waiting for trigger...")
         }
     }
 
@@ -629,7 +426,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startCapture() {
-        if (!isRecordingReady || currentMode == null) {
+        if (!isRecordingReady || engine == null) {
             Toast.makeText(this, "Camera not ready", Toast.LENGTH_SHORT).show()
             return
         }
@@ -639,7 +436,7 @@ class MainActivity : AppCompatActivity() {
         captureStartMs = android.os.SystemClock.elapsedRealtime()
 
         if (!recordedFromArmedMode) {
-            setFlash(true)
+            engine?.setFlash(true)
         }
 
         val timestamp = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US).format(Date())
@@ -658,34 +455,12 @@ class MainActivity : AppCompatActivity() {
             binding.armButton.isEnabled = false
         }
 
-        try {
-            currentMode!!.startRecording(currentOutputFile!!)
-        } catch (e: Exception) {
-            Log.e(TAG, "startRecording failed: ${e.message}", e)
-            updateStatus("ERROR: ${e.message}")
-            isRecordingReady = true
-            runOnUiThread {
-                if (isArmed) {
-                    binding.armButton.isEnabled = true
-                } else {
-                    binding.captureButton.isEnabled = true
-                    binding.armButton.isEnabled = true
-                }
-            }
+        backgroundHandler?.post {
+            engine?.startRecording(currentOutputFile!!)
         }
     }
 
     // ── HTTP Server ────────────────────────────────────────────
-
-    private fun isServerEnabled(): Boolean {
-        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        return prefs.getBoolean(PREF_SERVER_ENABLED, false)
-    }
-
-    private fun setServerEnabled(enabled: Boolean) {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .edit().putBoolean(PREF_SERVER_ENABLED, enabled).apply()
-    }
 
     private fun startCaptureServer() {
         if (captureServer != null) return
@@ -711,36 +486,6 @@ class MainActivity : AppCompatActivity() {
         captureServer?.stop()
         captureServer = null
         Log.i(TAG, "HTTP server stopped")
-    }
-
-    private fun toggleServer() {
-        if (captureServer != null) {
-            stopCaptureServer()
-            setServerEnabled(false)
-            Toast.makeText(this, "HTTP server stopped", Toast.LENGTH_SHORT).show()
-        } else {
-            startCaptureServer()
-            setServerEnabled(true)
-            if (captureServer != null) {
-                Toast.makeText(this, "HTTP server started", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "Failed to start server", Toast.LENGTH_SHORT).show()
-                setServerEnabled(false)
-            }
-        }
-    }
-
-    private fun showServerInfo() {
-        val url = captureServer?.getServerUrl()
-        if (url == null) {
-            Toast.makeText(this, "Server not running or no WiFi", Toast.LENGTH_SHORT).show()
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("HTTP Server")
-            .setMessage("Base URL: $url\n\nEndpoints:\n  GET /captures - list captures\n  GET /capture/<filename> - download a capture")
-            .setPositiveButton("Close", null)
-            .show()
     }
 
     // ── Helpers ─────────────────────────────────────────────────

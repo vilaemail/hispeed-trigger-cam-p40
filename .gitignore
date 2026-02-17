@@ -31,8 +31,13 @@ local.properties
 # Huawei SDK (download via scripts\fetch-sdk.bat)
 app/libs/
 
-# Temporary AAR extraction
+# Build-generated dex asset (produced by dexifyPatchedJar Gradle task)
+app/src/main/assets/hwcamerakit_patched.dex.jar
+
+# Reverse engineering
 temp_aar/
+temp/
+pull/
 
 # Signing - never commit keystores or passwords
 signing/release.keystore
@@ -49,3 +54,5 @@ Thumbs.db
 
 # Log files
 *.log
+
+libs/

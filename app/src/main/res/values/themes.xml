@@ -4,4 +4,10 @@
         <item name="android:windowFullscreen">true</item>
         <item name="android:keepScreenOn">true</item>
     </style>
+
+    <style name="Theme.HiSpeedTriggerCam.Settings" parent="Theme.AppCompat.DayNight.DarkActionBar">
+        <item name="colorPrimary">#FF303030</item>
+        <item name="colorPrimaryDark">#FF212121</item>
+        <item name="colorAccent">#FF4CAF50</item>
+    </style>
 </resources>
