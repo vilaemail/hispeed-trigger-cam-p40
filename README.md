@@ -47,6 +47,7 @@ Pull requests are welcome, as long as the main app functionality keeps working a
 - Huawei P40 Pro (EMUI 10.0+) connected to computer with USB debugging enabled and the computer authorized.
 - JDK 17+, Android SDK (API 36)
 - Python 3
+- [GitHub CLI](https://cli.github.com/) (`gh`) - only needed for `scripts\release.bat` (optional)
 
 ### Steps
 

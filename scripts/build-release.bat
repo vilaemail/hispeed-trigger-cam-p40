@@ -12,25 +12,23 @@ if not exist "signing\release.keystore" (
     exit /b 1
 )
 
-powershell -NoProfile -Command ^
+for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command ^
     "$pw = Read-Host 'Keystore password' -AsSecureString;" ^
-    "$plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw));" ^
-    "@(" ^
-    "  'storeFile=../signing/release.keystore'," ^
-    "  \"storePassword=$plain\"," ^
-    "  'keyAlias=release'," ^
-    "  \"keyPassword=$plain\"" ^
-    ") | Set-Content -Path 'signing/keystore.properties' -Encoding ASCII"
+    "[Runtime.InteropServices.Marshal]::PtrToStringAuto(" ^
+    "[Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw))"`) do set "KS_PW=%%p"
 
-if not exist "signing\keystore.properties" (
-    echo ERROR: Failed to create signing config.
+if not defined KS_PW (
+    echo ERROR: Failed to capture keystore password.
     exit /b 1
 )
 
+set "KEYSTORE_FILE=../signing/release.keystore"
+set "KEYSTORE_PASSWORD=%KS_PW%"
+set "KEY_ALIAS=release"
+set "KEY_PASSWORD=%KS_PW%"
+
 call gradlew.bat assembleRelease
 set "BUILD_RESULT=%ERRORLEVEL%"
-
-del /q "signing\keystore.properties" 2>nul
 
 if %BUILD_RESULT% neq 0 (
     echo.
