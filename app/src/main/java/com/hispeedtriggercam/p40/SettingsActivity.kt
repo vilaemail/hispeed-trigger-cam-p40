@@ -1,15 +1,28 @@
 package com.hispeedtriggercam.p40
 
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.os.storage.StorageManager
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.util.Log
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.RadioButton
+import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -66,6 +79,7 @@ class SettingsActivity : AppCompatActivity() {
         setupEngine()
         setupFps()
         setupServer()
+        setupRemoteTrigger()
         setupPushExternal()
         setupClearRecordings()
         setupClearExternal()
@@ -151,6 +165,264 @@ class SettingsActivity : AppCompatActivity() {
             .filterIsInstance<Inet4Address>()
             .firstOrNull { !it.isLoopbackAddress }
             ?.hostAddress
+    }
+
+    // Edge characters for the ESP trigger protocol
+    private val edgeLabels = arrayOf("Rising (/)", "Falling (\\)", "Both (X)")
+    private val edgeChars = charArrayOf('/', '\\', 'X')
+
+    @Suppress("UseSwitchCompatOrMaterialCode")
+    private fun setupRemoteTrigger() {
+        val triggerSwitch = findViewById<Switch>(R.id.remoteTriggerSwitch)
+        val deviceSection = findViewById<LinearLayout>(R.id.serialDeviceSection)
+        val deviceInfoText = findViewById<TextView>(R.id.serialDeviceInfoText)
+
+        val ledPinEdit = findViewById<EditText>(R.id.espLedPinEdit)
+        val ledOnMsEdit = findViewById<EditText>(R.id.espLedOnMsEdit)
+        val cooldownSEdit = findViewById<EditText>(R.id.espCooldownSEdit)
+        val triggerDelayMsEdit = findViewById<EditText>(R.id.espTriggerDelayMsEdit)
+        val triggersContainer = findViewById<LinearLayout>(R.id.triggersContainer)
+        val addTriggerButton = findViewById<Button>(R.id.addTriggerButton)
+        val validationText = findViewById<TextView>(R.id.espValidationText)
+
+        triggerSwitch.isChecked = settings.remoteTriggerEnabled
+        deviceSection.visibility = if (settings.remoteTriggerEnabled) View.VISIBLE else View.GONE
+
+        triggerSwitch.setOnCheckedChangeListener { _, checked ->
+            settings.remoteTriggerEnabled = checked
+            deviceSection.visibility = if (checked) View.VISIBLE else View.GONE
+            if (checked) refreshSerialDeviceInfo(deviceInfoText)
+        }
+
+        // Populate ESP params from settings
+        ledPinEdit.setText(settings.espLedPin.toString())
+        ledOnMsEdit.setText(settings.espLedOnMs.toString())
+        triggerDelayMsEdit.setText(settings.espTriggerDelayMs.toString())
+        // Display cooldown in seconds (stored as ms)
+        val cooldownS = settings.espCooldownMs / 1000.0
+        cooldownSEdit.setText(if (cooldownS == cooldownS.toLong().toDouble()) {
+            cooldownS.toLong().toString()
+        } else {
+            "%.1f".format(cooldownS)
+        })
+
+        // Validation + save for LED Pin
+        ledPinEdit.addTextChangedListener(validatingIntWatcher(
+            validationText, 0, 100, "LED Pin"
+        ) { settings.espLedPin = it })
+
+        // Validation + save for LED On (ms)
+        ledOnMsEdit.addTextChangedListener(validatingIntWatcher(
+            validationText, 0, 10000, "LED On"
+        ) { settings.espLedOnMs = it })
+
+        // Validation + save for Trigger Delay (ms, max 10000ms = 10s)
+        triggerDelayMsEdit.addTextChangedListener(validatingIntWatcher(
+            validationText, 0, 10000, "Trigger Delay"
+        ) { settings.espTriggerDelayMs = it })
+
+        // Validation + save for Cooldown (seconds → stored as ms)
+        cooldownSEdit.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val text = s?.toString() ?: return
+                val seconds = text.toDoubleOrNull()
+                if (seconds == null || seconds < 0 || seconds > 10) {
+                    validationText.text = "Cooldown must be 0–10 seconds"
+                    validationText.visibility = View.VISIBLE
+                    return
+                }
+                validationText.visibility = View.GONE
+                settings.espCooldownMs = (seconds * 1000).toInt()
+            }
+        })
+
+        // Populate trigger list from settings
+        parseTriggers(settings.espTriggers).forEach { (gpio, edge) ->
+            addTriggerRow(triggersContainer, gpio, edge)
+        }
+
+        addTriggerButton.setOnClickListener {
+            addTriggerRow(triggersContainer, 4, '/')
+            saveTriggers(triggersContainer)
+        }
+
+        if (settings.remoteTriggerEnabled) {
+            refreshSerialDeviceInfo(deviceInfoText)
+        }
+    }
+
+    private fun validatingIntWatcher(
+        validationText: TextView,
+        min: Int,
+        max: Int,
+        label: String,
+        setter: (Int) -> Unit
+    ): TextWatcher {
+        return object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val value = s?.toString()?.toIntOrNull()
+                if (value == null || value < min || value > max) {
+                    validationText.text = "$label must be $min–$max"
+                    validationText.visibility = View.VISIBLE
+                    return
+                }
+                validationText.visibility = View.GONE
+                setter(value)
+            }
+        }
+    }
+
+    private fun parseTriggers(str: String): List<Pair<Int, Char>> {
+        val result = mutableListOf<Pair<Int, Char>>()
+        for (token in str.trim().split("\\s+".toRegex())) {
+            if (token.isEmpty()) continue
+            val edge = token.last()
+            if (edge !in charArrayOf('/', '\\', 'X')) continue
+            val gpio = token.dropLast(1).toIntOrNull() ?: continue
+            result.add(gpio to edge)
+        }
+        return result.ifEmpty { listOf(4 to '/') }
+    }
+
+    private fun serializeTriggers(container: LinearLayout): String {
+        val parts = mutableListOf<String>()
+        for (i in 0 until container.childCount) {
+            val row = container.getChildAt(i) as? LinearLayout ?: continue
+            val gpioEdit = row.getChildAt(0) as? EditText ?: continue
+            val edgeSpinner = row.getChildAt(1) as? Spinner ?: continue
+            val gpio = gpioEdit.text.toString().toIntOrNull() ?: continue
+            val edgeIdx = edgeSpinner.selectedItemPosition
+            if (edgeIdx in edgeChars.indices) {
+                parts.add("$gpio${edgeChars[edgeIdx]}")
+            }
+        }
+        return parts.joinToString(" ").ifEmpty { "4/" }
+    }
+
+    private fun saveTriggers(container: LinearLayout) {
+        settings.espTriggers = serializeTriggers(container)
+    }
+
+    private fun addTriggerRow(container: LinearLayout, gpio: Int, edge: Char) {
+        val dp8 = dpToPx(8)
+        val validationText = findViewById<TextView>(R.id.espValidationText)
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(4) }
+        }
+
+        // GPIO number input
+        val gpioEdit = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(gpio.toString())
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            hint = "GPIO"
+            setHintTextColor(Color.parseColor("#FF666666"))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginEnd = dp8 }
+        }
+        gpioEdit.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val value = s?.toString()?.toIntOrNull()
+                if (value != null && (value < 0 || value > 100)) {
+                    validationText.text = "GPIO must be 0–100"
+                    validationText.visibility = View.VISIBLE
+                } else {
+                    validationText.visibility = View.GONE
+                    saveTriggers(container)
+                }
+            }
+        })
+
+        // Edge spinner
+        val edgeSpinner = Spinner(this).apply {
+            adapter = darkSpinnerAdapter(edgeLabels.toList())
+            val edgeIdx = edgeChars.indexOf(edge)
+            setSelection(if (edgeIdx >= 0) edgeIdx else 0)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.5f)
+                .apply { marginEnd = dp8 }
+            setPopupBackgroundDrawable(ColorDrawable(Color.parseColor("#FF424242")))
+        }
+        edgeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                saveTriggers(container)
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // Remove button
+        val removeBtn = Button(this).apply {
+            text = "X"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setBackgroundColor(Color.parseColor("#FFD32F2F"))
+            layoutParams = LinearLayout.LayoutParams(dpToPx(36), dpToPx(36))
+            setPadding(0, 0, 0, 0)
+        }
+        removeBtn.setOnClickListener {
+            if (container.childCount > 1) {
+                container.removeView(row)
+                saveTriggers(container)
+            }
+        }
+
+        row.addView(gpioEdit)
+        row.addView(edgeSpinner)
+        row.addView(removeBtn)
+        container.addView(row)
+    }
+
+    private fun dpToPx(dp: Int): Int =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp.toFloat(), resources.displayMetrics).toInt()
+
+    private fun <T> darkSpinnerAdapter(items: List<T>): ArrayAdapter<T> {
+        return object : ArrayAdapter<T>(this, android.R.layout.simple_spinner_item, items) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                return super.getView(position, convertView, parent).also {
+                    (it as? TextView)?.setTextColor(Color.WHITE)
+                }
+            }
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                return super.getDropDownView(position, convertView, parent).also {
+                    (it as? TextView)?.apply {
+                        setTextColor(Color.WHITE)
+                        setBackgroundColor(Color.parseColor("#FF424242"))
+                    }
+                }
+            }
+        }.also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+    }
+
+    private fun refreshSerialDeviceInfo(infoText: TextView) {
+        val tempManager = SerialTriggerManager(this, object : SerialTriggerManager.Listener {
+            override fun onArmAcknowledged() {}
+            override fun onArmTimeout() {}
+            override fun onTriggerReceived() {}
+            override fun onSerialError(message: String) {}
+        })
+        val drivers = tempManager.getAvailableDevices()
+
+        if (drivers.isEmpty()) {
+            infoText.text = "No USB serial devices connected.\nWill auto-connect when a device is plugged in."
+        } else {
+            val names = drivers.joinToString("\n") { drv ->
+                val dev = drv.device
+                "  \u2022 ${dev.productName ?: "Unknown"} (${dev.deviceName})"
+            }
+            infoText.text = "Available devices (auto-connects to first):\n$names"
+        }
     }
 
     private fun setupPushExternal() {

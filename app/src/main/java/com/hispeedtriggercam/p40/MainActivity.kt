@@ -1,14 +1,19 @@
 package com.hispeedtriggercam.p40
 
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
+import android.hardware.usb.UsbManager
 import android.view.MotionEvent
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import android.util.Size
 import android.view.KeyEvent
@@ -64,6 +69,48 @@ class MainActivity : AppCompatActivity() {
     private var retryCount = 0
 
     private var captureServer: CaptureServer? = null
+    private var serialManager: SerialTriggerManager? = null
+    private val useRemoteTrigger get() = settings.remoteTriggerEnabled
+    private var usbReceiverRegistered = false
+
+    private val usbHotplugReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    // Check if the attached device is a serial device
+                    val tempMgr = SerialTriggerManager(context, object : SerialTriggerManager.Listener {
+                        override fun onArmAcknowledged() {}
+                        override fun onArmTimeout() {}
+                        override fun onTriggerReceived() {}
+                        override fun onSerialError(message: String) {}
+                    })
+                    val drivers = tempMgr.getAvailableDevices()
+                    if (drivers.isNotEmpty()) {
+                        val dev = drivers.first().device
+                        val name = dev.productName ?: dev.deviceName
+                        Toast.makeText(context, "USB serial device connected: $name", Toast.LENGTH_SHORT).show()
+                        Log.i(TAG, "USB serial attached: $name (${drivers.size} device(s))")
+                    }
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    val tempMgr = SerialTriggerManager(context, object : SerialTriggerManager.Listener {
+                        override fun onArmAcknowledged() {}
+                        override fun onArmTimeout() {}
+                        override fun onTriggerReceived() {}
+                        override fun onSerialError(message: String) {}
+                    })
+                    val drivers = tempMgr.getAvailableDevices()
+                    if (drivers.isEmpty()) {
+                        Toast.makeText(context, "USB serial device disconnected", Toast.LENGTH_SHORT).show()
+                        Log.i(TAG, "USB serial detached — no devices remaining")
+                    } else {
+                        Toast.makeText(context, "USB device disconnected (${drivers.size} still connected)", Toast.LENGTH_SHORT).show()
+                        Log.i(TAG, "USB detached — ${drivers.size} device(s) remaining")
+                    }
+                }
+            }
+        }
+    }
 
     private var preSettingsServer = false
 
@@ -89,6 +136,14 @@ class MainActivity : AppCompatActivity() {
         binding.textureView.surfaceTextureListener = surfaceTextureListener
         setupTapToFocus()
         if (settings.serverEnabled) startCaptureServer()
+
+        // Listen for USB hotplug events
+        val usbFilter = IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        registerReceiver(usbHotplugReceiver, usbFilter)
+        usbReceiverRegistered = true
     }
 
     override fun onResume() {
@@ -110,6 +165,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (usbReceiverRegistered) {
+            try { unregisterReceiver(usbHotplugReceiver) } catch (_: Exception) {}
+            usbReceiverRegistered = false
+        }
+        closeSerial()
         captureServer?.stop()
         captureServer = null
         super.onDestroy()
@@ -153,6 +213,16 @@ class MainActivity : AppCompatActivity() {
             if (newServer) startCaptureServer() else stopCaptureServer()
         }
 
+        // If remote trigger was disabled while serial is open, clean up
+        if (!settings.remoteTriggerEnabled && serialManager != null) {
+            if (isArmed) {
+                serialManager?.sendReset()
+                isArmed = false
+                binding.armButton.text = getString(R.string.arm)
+            }
+            closeSerial()
+        }
+
         // Update local fields — camera will reinitialize in onResume()
         engineType = settings.engineType
         use1920fps = settings.use1920fps
@@ -164,7 +234,8 @@ class MainActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN &&
             event.keyCode == KeyEvent.KEYCODE_R &&
-            isArmed && isRecordingReady
+            isArmed && isRecordingReady &&
+            !useRemoteTrigger
         ) {
             Log.i(TAG, "USB HID trigger 'r' received - starting capture")
             startCapture()
@@ -197,6 +268,10 @@ class MainActivity : AppCompatActivity() {
         }
         engine = null
         isRecordingReady = false
+        if (isArmed && useRemoteTrigger) {
+            serialManager?.sendReset()
+            closeSerial()
+        }
         isArmed = false
         previewSurface?.release()
         previewSurface = null
@@ -263,9 +338,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onRecordingReady() {
-            Log.i(TAG, "[${engineType.label}] RECORDING_READY +${elapsedMs()}ms")
+            Log.i(TAG, "[${engineType.label}] RECORDING_READY +${elapsedMs()}ms isArmed=$isArmed recordedFromArmed=$recordedFromArmedMode")
             retryCount = 0
-            if (!recordedFromArmedMode) {
+            if (isArmed) {
+                // Re-apply torch — mode may cycle back to READY and reset flash
+                engine?.setFlash(true)
+            } else if (!recordedFromArmedMode) {
                 engine?.setFlash(false)
             }
             isRecordingReady = true
@@ -388,23 +466,141 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    // ── Serial Trigger ─────────────────────────────────────────
+
+    private val serialListener = object : SerialTriggerManager.Listener {
+        override fun onArmAcknowledged() {
+            Log.i(TAG, "Serial arm acknowledged — entering armed mode")
+            enterArmedState()
+        }
+
+        override fun onArmTimeout() {
+            Log.w(TAG, "Serial arm timeout — no OK received")
+            Toast.makeText(this@MainActivity,
+                getString(R.string.serial_arm_timeout), Toast.LENGTH_LONG).show()
+            exitArmingState()
+            closeSerial()
+        }
+
+        override fun onTriggerReceived() {
+            Log.i(TAG, "Serial trigger 'r' received — starting capture")
+            if (isArmed && isRecordingReady) {
+                startCapture()
+            }
+        }
+
+        override fun onSerialError(message: String) {
+            Log.e(TAG, "Serial error: $message")
+            Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+            if (isArmed) {
+                isArmed = false
+                engine?.setFlash(false)
+                binding.armButton.text = getString(R.string.arm)
+                if (isRecordingReady) {
+                    binding.captureButton.isEnabled = true
+                    binding.armButton.isEnabled = true
+                }
+                binding.moreButton.isEnabled = true
+                updateStatus("Serial error — unarmed")
+            } else {
+                exitArmingState()
+            }
+            closeSerial()
+        }
+    }
+
+    private fun openSerial(): Boolean {
+        val mgr = SerialTriggerManager(this, serialListener)
+        val drivers = mgr.getAvailableDevices()
+        val driver = drivers.firstOrNull()
+
+        if (driver == null) {
+            Toast.makeText(this, "No USB serial device found", Toast.LENGTH_LONG).show()
+            return false
+        }
+
+        val devName = driver.device.productName ?: driver.device.deviceName
+        Toast.makeText(this, "Connecting to $devName...", Toast.LENGTH_SHORT).show()
+
+        serialManager = mgr
+        mgr.open(driver) {
+            // Called when port is ready (after permission grant + ESP boot delay)
+            // Send reset first to clear any stale state on the ESP
+            mgr.sendReset()
+            // Small delay to let the ESP process the reset before arming
+            Handler(Looper.getMainLooper()).postDelayed({
+                // Convert display units to microseconds for the ESP protocol
+                mgr.sendArm(
+                    settings.espLedPin,
+                    settings.espLedOnMs * 1000,          // ms → µs
+                    settings.espCooldownMs * 1000,        // ms → µs
+                    settings.espTriggerDelayMs * 1000,    // ms → µs
+                    settings.espTriggers
+                )
+            }, 200)
+        }
+        return true
+    }
+
+    private fun closeSerial() {
+        serialManager?.close()
+        serialManager = null
+    }
+
+    private fun enterArmingState() {
+        binding.captureButton.isEnabled = false
+        binding.armButton.isEnabled = false
+        binding.moreButton.isEnabled = false
+        updateStatus(getString(R.string.serial_arming))
+    }
+
+    private fun exitArmingState() {
+        binding.armButton.isEnabled = true
+        binding.moreButton.isEnabled = true
+        if (isRecordingReady) {
+            binding.captureButton.isEnabled = true
+        }
+        updateStatus(if (isRecordingReady) "Ready — press CAPTURE" else "Waiting for ready...")
+    }
+
+    private fun enterArmedState() {
+        isArmed = true
+        engine?.setFlash(true)
+        binding.armButton.text = getString(R.string.unarm)
+        binding.armButton.isEnabled = true
+        binding.captureButton.isEnabled = false
+        binding.moreButton.isEnabled = true
+        updateStatus("Armed — waiting for trigger...")
+    }
+
     // ── Arm / Unarm ─────────────────────────────────────────────
 
     private fun onArmPressed() {
         if (isArmed) {
+            // ── UNARM ──
             isArmed = false
             engine?.setFlash(false)
             binding.armButton.text = getString(R.string.arm)
+
+            if (useRemoteTrigger) {
+                serialManager?.sendReset()
+                closeSerial()
+            }
+
             if (isRecordingReady) {
                 binding.captureButton.isEnabled = true
             }
             updateStatus(if (isRecordingReady) "Ready — press CAPTURE" else "Waiting for ready...")
         } else {
-            isArmed = true
-            engine?.setFlash(true)
-            binding.armButton.text = getString(R.string.unarm)
-            binding.captureButton.isEnabled = false
-            updateStatus("Armed — waiting for trigger...")
+            // ── ARM ──
+            if (useRemoteTrigger) {
+                enterArmingState()
+                if (!openSerial()) {
+                    exitArmingState()
+                }
+            } else {
+                enterArmedState()
+            }
         }
     }
 

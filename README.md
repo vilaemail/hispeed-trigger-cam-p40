@@ -1,13 +1,18 @@
 # HiSpeed Trigger Cam P40
 
-Super slow motion capture app for Huawei P40.
+Super slow motion capture app for Huawei P40 with capability to trigger recordings via COM port.
+
+## Works great with
+
+- To automatically copy captures to PC and view them in specialized software check out [HiSpeed Viewer](https://github.com/vilaemail/hispeed-viewer).
+- To trigger the recording based on electrical signal (correlating camera capture with electrical signal capture, for example with oscilloscope or logic analyzer) check out [HiSpeed Trigger](https://github.com/vilaemail/hispeed-trigger).
 
 ## Functionalities
 
 ### Capture modes
 
 - Single manual capture by pressing `Capture` button. Captures a 0.5s burst at selected FPS/resolution. Saves to `DCIM/hispeed-trigger-cam/YYYY-MM-DD-HH-MM-SS-SSS_FFFfps.mp4`.
-- Externally triggered capture by key `r` from a HID (i.e. USBC connected keyboard). Activated by pressing `Arm` button after which each `r` keypress results in a capture (same as single manual capture). Keypresses while capture/processing is in progress will not result in new capture.
+- Externally triggered capture by message received over COM port. Activated by pressing `Arm` button. Compatible device connected to USBC port is required. For example [this one](https://github.com/vilaemail/hispeed-trigger).
 
 ### Resolution, framerate and quality
 

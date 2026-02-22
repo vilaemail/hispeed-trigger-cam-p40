@@ -3,3 +3,4 @@
 - Fix clicking on screen to focus that part of the image.
 - Fix (if possible) in each of engines such that torch (camera flash) is turned off immediatelly after recording ends (not only after processing ends)
 - Definitely know when copying to external drive is finished and let the user know.
+- The time shown in text on screen sometimes is very long (milions of miliseconds), do not show these obviously wrong timings.

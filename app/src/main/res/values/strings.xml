@@ -20,4 +20,17 @@
     <string name="settings_clear_external">Clear External Drive Recordings</string>
     <string name="settings_about">About</string>
     <string name="settings_github">View on GitHub</string>
+    <string name="settings_remote_trigger">Remote Triggering</string>
+    <string name="serial_arming">Arming via serial…</string>
+    <string name="serial_arm_timeout">No response from trigger device (timeout)</string>
+    <string name="serial_disconnected">Trigger device disconnected</string>
+    <string name="settings_esp_led_pin">LED Pin</string>
+    <string name="settings_esp_led_on_ms">LED On (ms)</string>
+    <string name="settings_esp_cooldown_s">Cooldown (s)</string>
+    <string name="settings_esp_trigger_delay_ms">Trigger Delay (ms)</string>
+    <string name="settings_esp_triggers">GPIO Triggers</string>
+    <string name="settings_add_trigger">+ Add Trigger</string>
+    <string name="edge_rising">Rising (/)</string>
+    <string name="edge_falling">Falling (\\)</string>
+    <string name="edge_both">Both (X)</string>
 </resources>

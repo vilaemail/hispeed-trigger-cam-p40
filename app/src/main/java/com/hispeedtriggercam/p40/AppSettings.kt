@@ -33,6 +33,33 @@ class AppSettings(context: Context) {
         get() = prefs.getString("external_drive_uri", null)
         set(value) = prefs.edit().putString("external_drive_uri", value).apply()
 
+    var remoteTriggerEnabled: Boolean
+        get() = prefs.getBoolean("remote_trigger_enabled", false)
+        set(value) = prefs.edit().putBoolean("remote_trigger_enabled", value).apply()
+
+    var espLedPin: Int
+        get() = prefs.getInt("esp_led_pin", 2)
+        set(value) = prefs.edit().putInt("esp_led_pin", value).apply()
+
+    /** LED on duration in milliseconds (displayed as ms, sent as µs) */
+    var espLedOnMs: Int
+        get() = prefs.getInt("esp_led_on_ms", 10)
+        set(value) = prefs.edit().putInt("esp_led_on_ms", value).apply()
+
+    /** Cooldown in milliseconds (displayed as seconds, sent as µs) */
+    var espCooldownMs: Int
+        get() = prefs.getInt("esp_cooldown_ms", 6000)
+        set(value) = prefs.edit().putInt("esp_cooldown_ms", value).apply()
+
+    /** Trigger delay in milliseconds (displayed as ms, sent as µs) */
+    var espTriggerDelayMs: Int
+        get() = prefs.getInt("esp_trigger_delay_ms", 200)
+        set(value) = prefs.edit().putInt("esp_trigger_delay_ms", value).apply()
+
+    var espTriggers: String
+        get() = prefs.getString("esp_triggers", "4/") ?: "4/"
+        set(value) = prefs.edit().putString("esp_triggers", value).apply()
+
     val videoFps get() = if (use1920fps) 1920 else 960
     val videoWidth get() = if (use1920fps) 1280 else 1920
     val videoHeight get() = if (use1920fps) 720 else 1080
